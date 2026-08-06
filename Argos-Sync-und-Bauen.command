@@ -10,6 +10,13 @@
 #    * Drei SSH-Sitzungen: tar-Strom ohne Terminal, sudo mit Terminal.
 #    * Jeder sudo-Aufruf kostet auf der NAS ~18 s → ein sudo pro Schritt.
 #
+#  Warum aus einem Commit und nicht aus dem Ordner (05.08.2026):
+#    Vorher war der Arbeitsordner die Quelle. Damit konnte live gehen, was
+#    nirgends verzeichnet war — und hinterher ließ sich nicht mehr sagen,
+#    welcher Stand eigentlich läuft. Jetzt gilt: erst committen, dann
+#    pushen, und ausgeliefert wird ausschließlich der gepushte Commit.
+#    GitHub ist die Quelle, der Arbeitsordner nur die Werkbank.
+#
 #  Sicherheit:
 #    * Die .env wird NIE mitgeschickt — beim Packen ausgeschlossen UND vor
 #      dem Senden im Inhaltsverzeichnis geprüft.
@@ -174,24 +181,33 @@ VERSION=$(grep VERSION core/version.py | tail -1 | cut -d'"' -f2)
 echo "   Version: $VERSION"
 echo "   Ziel:    $NAS_USER@$NAS_HOST:$ZIEL"
 
-# ── Git-Stand anzeigen ─────────────────────────────────────
-# Gepackt wird der ARBEITSSTAND, nicht der letzte Commit. Nicht eingecheckte
-# Änderungen gehen also live — landen aber nicht auf GitHub. Dann stimmt
-# „was oben liegt" nicht mehr mit „was läuft" überein, und genau das soll
-# diese Zeile verhindern. Nur ein Hinweis, kein Riegel: Zum Ausprobieren
-# muss man auch mal etwas Uneingechecktes bauen dürfen.
-GIT_ZWEIG=$(git branch --show-current 2>/dev/null)
-GIT_STAND=$(git rev-parse --short HEAD 2>/dev/null)
-GIT_SAUBER=""
-if [ -n "$GIT_STAND" ]; then
-  if [ -z "$(git status --porcelain 2>/dev/null)" ]; then
-    GIT_SAUBER="ja"
-    echo "   Git:     $GIT_ZWEIG $GIT_STAND — alles eingecheckt"
-  else
-    echo "   Git:     $GIT_ZWEIG $GIT_STAND  ⚠️  nicht eingecheckte Änderungen"
-    echo "            Die gehen mit live, stehen danach aber nicht auf GitHub."
-  fi
+# ── Git: Quelle prüfen ────────────────────────────────────
+# Ausgeliefert wird ein Commit, nicht der Ordner. Also muss es einen geben,
+# er muss alles enthalten, was hier steht, und er muss nach GitHub können.
+git rev-parse --git-dir >/dev/null 2>&1 || ende 1 \
+  "⚠️  $QUELLE ist kein Git-Ordner." \
+  "Seit 05.08. wird aus einem Commit ausgeliefert — ohne Git geht das nicht."
+
+GIT_ZWEIG=$(git branch --show-current)
+GIT_STAND=$(git rev-parse --short HEAD)
+git remote get-url origin >/dev/null 2>&1 || ende 1 \
+  "⚠️  Keine Fernkopie eingetragen (origin fehlt)."
+
+if [ -n "$(git status --porcelain)" ]; then
+  echo "   ⚠️  Nicht eingecheckte Änderungen:"
+  git status --porcelain | head -8 | sed 's/^/        /'
+  echo ""
+  # Bewusst eine Rückfrage und kein harter Riegel: Zum Ausprobieren muss man
+  # auch mal etwas Halbfertiges auf die NAS bekommen. Aber dann soll klar
+  # sein, dass GitHub danach NICHT dem entspricht, was läuft.
+  read -r -p "   Trotzdem ausliefern? Dann geht der Stand von $GIT_STAND raus, OHNE diese Änderungen. [j/N] " ANTWORT
+  case "$ANTWORT" in
+    [jJ]) echo "   ℹ️  Weiter — ausgeliefert wird $GIT_STAND, nicht dein Arbeitsstand." ;;
+    *)    ende 1 "Abgebrochen. Erst committen, dann bauen." ;;
+  esac
+  echo ""
 fi
+echo "   Git:     $GIT_ZWEIG $GIT_STAND"
 echo ""
 
 # ── 1. Leitung ─────────────────────────────────────────────
@@ -202,12 +218,36 @@ VERZ=$(ping -c 3 -W 2000 "$NAS_HOST" 2>/dev/null | awk -F'/' '/round-trip/ {prin
 echo "   ✅  erreichbar${VERZ:+, Verzögerung ~${VERZ} ms}"
 echo ""
 
+# ── 1b. Auf GitHub schieben — VOR dem Ausliefern ───────────────
+# Reihenfolge mit Absicht: Was nicht auf GitHub steht, wird nicht
+# ausgeliefert. Andersherum gäbe es Stände, die laufen, aber nirgends
+# verzeichnet sind — genau das wollten wir loswerden.
+echo "   ☁️   Auf GitHub schieben …"
+if ! GIT_SSH_COMMAND="ssh -o ConnectTimeout=20 -o BatchMode=yes" \
+     git push --follow-tags origin "$GIT_ZWEIG" 2>&1 | sed 's/^/        /'; then
+  ende 1 "⚠️  Push nach GitHub fehlgeschlagen — es wurde nichts ausgeliefert." \
+         "Internet erreichbar? SSH-Schlüssel geladen (ssh -T git@github.com)?"
+fi
+
+# Push-Prüfung: Nicht dem Ergebniscode vertrauen, sondern nachsehen.
+FERN_STAND=$(GIT_SSH_COMMAND="ssh -o ConnectTimeout=20 -o BatchMode=yes" \
+             git ls-remote origin "refs/heads/$GIT_ZWEIG" 2>/dev/null | cut -c1-7)
+if [ "$FERN_STAND" != "$GIT_STAND" ]; then
+  ende 1 "⚠️  GitHub steht auf ${FERN_STAND:-nichts}, hier liegt $GIT_STAND." \
+         "Es wurde nichts ausgeliefert."
+fi
+echo "   ✅  GitHub steht auf $GIT_STAND"
+echo ""
+
 # ── 2. Packen, mit Wächter über der .env ───────────────────
-echo "   📦  Packen …"
-# --no-xattrs: sonst quittiert das GNU-tar der NAS jede Datei mit
-# „Ignoring unknown extended header keyword 'LIBARCHIVE.xattr…'" — harmlos,
-# aber 50 Zeilen Rauschen, in denen echte Meldungen untergehen.
-COPYFILE_DISABLE=1 tar czf "$PAKET" --no-xattrs "${AUS[@]}" . || ende 1 "⚠️  Packen fehlgeschlagen."
+echo "   📦  Packen aus Commit $GIT_STAND …"
+# git archive statt tar über den Ordner: Es kommt genau hinein, was im
+# Commit steht. Unverfolgtes, .env, data/ und .venv können damit gar nicht
+# erst mitrutschen — die Ausschlussliste oben ist nur noch der zweite Riegel.
+# Nebenbei erledigt: git archive schreibt keine erweiterten Attribute, das
+# Rauschen des GNU-tar auf der NAS entfällt damit von selbst.
+git archive --format=tar "$GIT_STAND" | gzip > "$PAKET" \
+  || ende 1 "⚠️  Packen fehlgeschlagen."
 if tar tzf "$PAKET" | grep -qE '(^|/)\.env$'; then
   ende 1 "⛔  ABBRUCH: Im Paket steckt eine .env." \
          "Es wurde nichts gesendet. Das darf nie passieren — bitte melden."
@@ -262,14 +302,16 @@ echo ""
 
 # ── 5. Prüfen — und nur bei Gleichheit weiter ──────────────
 echo "   🔍  Prüfsummen vergleichen …"
-# tr VOR grep: über ein Terminal enden Zeilen mit \r
-sed -n '/---PRUEFSUMMEN---/,/---ENV---/p' "$MITSCHRIFT" | tr -d '\r' \
-  | grep -Eo '^[0-9a-f]{32}  \./.*$' | sort -u > "$NASSUM"
-find . -type f ! -name .env ! -path './.git/*' ! -path './.venv/*' \
-     ! -path './data/*' ! -path './staticfiles/*' ! -path './Wissen/*' \
-     ! -path './zeichen/*' ! -path './.claude/*' ! -name '._*' \
-     ! -name '.DS_Store' ! -name '*.pyc' ! -path '*/__pycache__/*' \
-  | while read -r f; do printf '%s  %s\n' "$(md5 -q "$f")" "$f"; done | sort -u > "$LOKSUM"
+sed -n '/---PRUEFSUMMEN---/,$p' "$MITSCHRIFT" | tr -d '\r' \
+  | grep -Eo '^[0-9a-f]{32}  \./.*$' | sed 's|  \./|  |' | sort -u > "$NASSUM"
+
+# Verglichen wird gegen den PAKETINHALT, nicht gegen den Arbeitsordner:
+# Seit aus einem Commit ausgeliefert wird, sind das zwei verschiedene Dinge.
+AUSPACK=$(mktemp -d "/tmp/argos-pack-XXXXXX") || abbruch_mktemp
+tar xzf "$PAKET" -C "$AUSPACK"
+( cd "$AUSPACK" && find . -type f | sed 's|^\./||' \
+  | while read -r f; do printf '%s  %s\n' "$(md5 -q "$f")" "$f"; done ) | sort -u > "$LOKSUM"
+rm -rf "$AUSPACK"
 
 NAS_N=$(wc -l < "$NASSUM" | tr -d ' ')
 [ "$NAS_N" -eq 0 ] && ende 1 \
@@ -277,14 +319,21 @@ NAS_N=$(wc -l < "$NASSUM" | tr -d ' ')
   "Übertragen und entpackt wurde vermutlich trotzdem." \
   "Bitte von Hand nachsehen, ob der Stand oben stimmt."
 
-if ! diff -q "$NASSUM" "$LOKSUM" >/dev/null; then
+# Teilmengen-Regel statt Gleichheit: Entpacken überschreibt, löscht aber
+# nichts. Auf der NAS liegen deshalb noch Dateien aus früheren Ständen —
+# das ist kein Fehler. Verlangt wird nur: JEDE Datei des Pakets muss oben
+# liegen und identisch sein.
+FEHLT=$(comm -23 "$LOKSUM" "$NASSUM")
+if [ -n "$FEHLT" ]; then
   echo ""
-  echo "   Abweichungen (< nur NAS, > nur lokal):"
-  diff "$NASSUM" "$LOKSUM" | grep -E '^[<>]' | awk '{print "     " $1, $3}' | head -15
-  ende 1 "⚠️  ES WIRD NICHT GEBAUT — genau das hat am 29.07. den Zerberus-Container zerlegt." \
+  echo "   Diese Dateien fehlen oben oder unterscheiden sich:"
+  echo "$FEHLT" | awk '{print "     " $2}' | head -15
+  ende 1 "⚠️  ES WIRD NICHT GEBAUT — ein halb übertragener Stand zerlegt den Container." \
          "Meist genügt: dieses Skript noch einmal laufen lassen."
 fi
-echo "   ✅  $NAS_N Dateien, alle Prüfsummen gleich"
+ALT=$(comm -13 "$LOKSUM" "$NASSUM" | wc -l | tr -d ' ')
+[ "$ALT" -gt 0 ] && echo "   ℹ️  $ALT Datei(en) auf der NAS stammen aus früheren Ständen (bleiben liegen)"
+echo "   ✅  $(wc -l < "$LOKSUM" | tr -d ' ') Dateien des Pakets, alle Prüfsummen gleich"
 echo ""
 
 # ── 5b. Ohne .env auf der NAS wird nicht gebaut ────────────
@@ -319,35 +368,9 @@ ueber_ssh "$FERN6" bau || { zeige_mitschrift; ende 1 \
 LAEUFT=$(sed -n '/---LAUFENDE-VERSION---/,$p' "$MITSCHRIFT" | tr -d '\r' \
          | grep -o '"[0-9][0-9.]*"' | tr -d '"' | head -1)
 if [ "$LAEUFT" = "$VERSION" ]; then
-# ── Auf GitHub schieben ────────────────────────────────────
-# ERST nach dem erfolgreichen Bau: Auf GitHub soll stehen, was wirklich
-# läuft — nicht ein Stand, der nie gestartet ist.
-#
-# Ein Fehlschlag hier macht den Durchgang NICHT zum Fehlschlag. Der
-# Container läuft dann trotzdem; es fehlt nur die Sicherung, und die holt
-# der nächste Lauf nach.
-#
-# BatchMode=yes: Fragt der Schlüssel nach einer Passphrase, soll das Skript
-# abbrechen und nicht stumm auf eine Eingabe warten, die niemand sieht.
-GIT_MELDUNG=""
-if [ -n "$GIT_STAND" ] && git remote get-url origin >/dev/null 2>&1; then
-  echo ""
-  echo "   ☁️   Auf GitHub schieben …"
-  if GIT_SSH_COMMAND="ssh -o ConnectTimeout=15 -o BatchMode=yes" \
-     git push --follow-tags origin "$GIT_ZWEIG" >>"$MITSCHRIFT" 2>&1; then
-    if [ -n "$GIT_SAUBER" ]; then
-      GIT_MELDUNG="☁️  GitHub steht auf demselben Stand ($GIT_STAND)."
-    else
-      GIT_MELDUNG="⚠️  GitHub hat $GIT_STAND — die uneingecheckten Änderungen fehlen dort."
-    fi
-    echo "   ✅  geschoben"
-  else
-    GIT_MELDUNG="⚠️  Push nach GitHub fehlgeschlagen — es fehlt nur die Sicherung."
-    echo "   ⚠️   Push fehlgeschlagen (VPN? Schlüssel?) — der Bau ist trotzdem durch."
-  fi
-fi
-
-  ende 0 "✅  Version $VERSION läuft." "$GIT_MELDUNG" "" "Oberfläche: http://$NAS_HOST:8643/"
+  ende 0 "✅  Version $VERSION läuft — Commit $GIT_STAND." \
+         "☁️  Derselbe Stand liegt auf GitHub." "" \
+         "Oberfläche: http://$NAS_HOST:8643/"
 else
   ende 1 "⚠️  Gebaut, aber der Container meldet ${LAEUFT:-unbekannt} statt $VERSION." \
          "Bitte im Container Manager ins Protokoll schauen."
