@@ -329,7 +329,10 @@ if [ -n "$FEHLT" ]; then
   echo "   Diese Dateien fehlen oben oder unterscheiden sich:"
   echo "$FEHLT" | awk '{print "     " $2}' | head -15
   ende 1 "⚠️  ES WIRD NICHT GEBAUT — ein halb übertragener Stand zerlegt den Container." \
-         "Meist genügt: dieses Skript noch einmal laufen lassen."
+         "Kam die Übertragung ins Stocken? Dann genügt ein zweiter Lauf." \
+         "Stehen dort immer dieselben Dateien, ist es kein Übertragungsfehler:" \
+         "Dann zählt die NAS-Prüfung sie nicht mit (FIND_AUS in diesem Skript)," \
+         "und sie gehören per export-ignore aus dem Paket."
 fi
 ALT=$(comm -13 "$LOKSUM" "$NASSUM" | wc -l | tr -d ' ')
 [ "$ALT" -gt 0 ] && echo "   ℹ️  $ALT Datei(en) auf der NAS stammen aus früheren Ständen (bleiben liegen)"

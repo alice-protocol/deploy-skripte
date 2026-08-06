@@ -280,7 +280,7 @@ echo "   📂  Entpacken und prüfen … (ein sudo-Aufruf, dauert ~20 s)"
 # @eaDir: DSM legt neben jeder Datei einen eigenen Indexordner an. Die gibt es
 # lokal nicht — ohne diesen Ausschluss meldet der Vergleich lauter Abweichungen,
 # die gar keine sind (30.07. genau so passiert).
-FIND_AUS="! -name .env ! -path './.git/*' ! -path './data/*' ! -path './staticfiles/*' ! -name '._*' ! -name .DS_Store ! -name '*.pyc' ! -path '*/__pycache__/*' ! -path '*/@eaDir/*' ! -name '*@SynoEAStream'"
+FIND_AUS="! -name .env ! -path './.git/*' ! -path './data/*' ! -path './staticfiles/*' ! -path './Wissen/*' ! -path './zeichen/*' ! -path './.claude/*' ! -name '._*' ! -name .DS_Store ! -name '*.pyc' ! -path '*/__pycache__/*' ! -path '*/@eaDir/*' ! -name '*@SynoEAStream'"
 FERN4=$(cat <<EOS
 cat > /tmp/zerberus-schritt4.sh <<'ZENDE'
 set -e
@@ -331,7 +331,10 @@ if [ -n "$FEHLT" ]; then
   echo "   Diese Dateien fehlen oben oder unterscheiden sich:"
   echo "$FEHLT" | awk '{print "     " $2}' | head -15
   ende 1 "⚠️  ES WIRD NICHT GEBAUT — genau das hat am 29.07. den Container zerlegt." \
-         "Meist genügt: dieses Skript noch einmal laufen lassen."
+         "Kam die Übertragung ins Stocken? Dann genügt ein zweiter Lauf." \
+         "Stehen dort immer dieselben Dateien, ist es kein Übertragungsfehler:" \
+         "Dann zählt die NAS-Prüfung sie nicht mit (FIND_AUS in diesem Skript)," \
+         "und sie gehören per export-ignore aus dem Paket."
 fi
 ALT=$(comm -13 "$LOKSUM" "$NASSUM" | wc -l | tr -d ' ')
 [ "$ALT" -gt 0 ] && echo "   ℹ️  $ALT Datei(en) auf der NAS stammen aus früheren Ständen (bleiben liegen)"
