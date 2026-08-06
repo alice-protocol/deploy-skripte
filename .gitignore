@@ -1,0 +1,5 @@
+.DS_Store
+._*
+# Handkopien vor Änderungen — seit es Git gibt, ist das die Historie.
+# Der Ordner bleibt lokal liegen, gehört aber nicht ins Repo.
+Backup/
